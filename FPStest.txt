@@ -1,0 +1,417 @@
+(() => {
+  // --- TOGGLE ---
+  if (window.__fpsHUD && window.__fpsHUD.stop) {
+    window.__fpsHUD.stop();
+    return;
+  }
+
+  /* ===== Knobs (tweaked per your asks) ===== */
+  const FOV_BASE = 1.0,
+    FOV_ZOOM = 0.94; // mild zoom
+  const LOOK_MAX_DEG = 3.5,
+    PARALLAX_PX = 14; // subtle tilt
+  const SPREAD_IDLE = 8,
+    SPREAD_SHOT = 22,
+    SPREAD_DECAY = 55;
+  const BULLET_SPEED = 2800; // faster bullets
+  const BULLET_RADIUS = 2.5;
+  const SPARK_COUNT = 36,
+    SPARK_SPEED = 1300; // quicker, punchier burst
+  const SPARK_GRAV = 2200,
+    SPARK_FADE = 0.55; // short life = fast explode
+  const TRAIL_FADE = 0.35; // shorter trail
+  const HITMARKER_TIME = 110,
+    DAMAGE_FADE = 180; // UI timing
+
+  /* ===== Scene wrap ===== */
+  const doc = document,
+    body = doc.body;
+  const wrap = doc.createElement('div');
+  wrap.id = '__fpshud_wrap';
+  Object.assign(wrap.style, {
+    position: 'relative',
+    transformStyle: 'preserve-3d',
+    willChange: 'transform',
+    transformOrigin: '50% 50%',
+    transition: 'transform 0.08s ease-out',
+    zIndex: 0,
+  });
+  const moved = [];
+  while (body.firstChild) {
+    const n = body.firstChild;
+    if (n.nodeType === 1 && n.id === '__fpshud_overlay') break;
+    moved.push(n);
+    wrap.appendChild(n);
+  }
+  body.appendChild(wrap);
+
+  /* ===== HUD overlay (much lighter) ===== */
+  const hud = doc.createElement('div');
+  hud.id = '__fpshud_overlay';
+  Object.assign(hud.style, {
+    position: 'fixed',
+    inset: '0',
+    pointerEvents: 'none',
+    zIndex: 2147483646,
+    fontFamily: 'Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif',
+    color: '#e8f7ff',
+    textShadow: '0 0 5px rgba(120,200,255,.25)',
+  });
+  body.appendChild(hud);
+
+  const fx = doc.createElement('canvas');
+  fx.id = '__fpshud_fx';
+  Object.assign(fx.style, {
+    position: 'fixed',
+    inset: '0',
+    zIndex: 2147483645,
+    pointerEvents: 'none',
+  });
+  body.appendChild(fx);
+  const ctx = fx.getContext('2d', { alpha: true });
+  const resize = () => {
+    fx.width = innerWidth;
+    fx.height = innerHeight;
+  };
+  resize();
+  addEventListener('resize', resize);
+
+  /* Light-touch styles */
+  const style = doc.createElement('style');
+  style.textContent = `
+#__fpshud_overlay .corner{position:absolute;padding:12px 14px;background:rgba(8,15,25,.18);
+  border:1px solid rgba(140,210,255,.18);border-radius:10px;backdrop-filter:blur(2px);
+  font-weight:600;letter-spacing:.5px;font-size:13px;opacity:.94}
+#__fpshud_overlay .hud-num{font-size:24px;font-weight:800;line-height:1.1}
+#__fpshud_overlay .health{left:18px;bottom:18px}
+#__fpshud_overlay .armor{left:18px;bottom:98px}
+#__fpshud_overlay .ammo{right:18px;bottom:18px;text-align:right}
+#__fpshud_overlay .fps{right:18px;top:18px}
+#__fpshud_overlay .crosshair{position:absolute;width:0;height:0}
+#__fpshud_overlay .line{position:absolute;background:#e8f7ff;box-shadow:0 0 8px rgba(140,210,255,.45)}
+#__fpshud_overlay .line.v{width:2px;height:16px;left:-1px}
+#__fpshud_overlay .line.h{height:2px;width:16px;top:-1px}
+#__fpshud_overlay .dot{position:absolute;width:4px;height:4px;background:#e8f7ff;border-radius:50%;left:-2px;top:-2px;opacity:.85}
+#__fpshud_overlay .hit{position:absolute;width:20px;height:20px;transform:rotate(45deg);border:2px solid #fff;opacity:0}
+#__fpshud_overlay .zoom-ring{position:absolute;width:150px;height:150px;border:1px solid rgba(160,220,255,.22);border-radius:50%;opacity:0;transition:opacity .08s}
+#__fpshud_overlay .vignette{position:absolute;inset:0;background:radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.12) 100%);mix-blend-mode:multiply;opacity:}
+#__fpshud_overlay .damage{position:absolute;inset:0;background:radial-gradient(ellipse at center, rgba(255,0,0,.25), transparent 55%);opacity:0;transition:opacity .16s}
+#__fpshud_overlay .ret-info{position:absolute;font-size:11px;opacity:.65}
+`;
+  hud.appendChild(style);
+
+  /* HUD blocks (bigger/cleaner) */
+  const mk = (cls, html) => {
+    const d = doc.createElement('div');
+    d.className = `corner ${cls}`;
+    d.innerHTML = html;
+    hud.appendChild(d);
+    return d;
+  };
+  mk('health', `<div>HEALTH</div><div class="hud-num" id="__hval">100</div>`);
+  mk('armor', `<div>ARMOR</div><div class="hud-num" id="__aval">50</div>`);
+  mk(
+    'ammo',
+    `<div>AMMO</div><div class="hud-num"><span id="__ammo">30</span> / <span id="__mag">120</span></div>`
+  );
+  mk('fps', `<div>FPS</div><div class="hud-num" id="__fps">--</div>`);
+
+  /* Crosshair follows cursor */
+  const cross = doc.createElement('div');
+  cross.className = 'crosshair';
+  Object.assign(cross.style, { left: '0px', top: '0px' });
+  const vTop = doc.createElement('div');
+  vTop.className = 'line v';
+  const vBot = doc.createElement('div');
+  vBot.className = 'line v';
+  const hL = doc.createElement('div');
+  hL.className = 'line h';
+  const hR = doc.createElement('div');
+  hR.className = 'line h';
+  const dot = doc.createElement('div');
+  dot.className = 'dot';
+  cross.append(vTop, vBot, hL, hR, dot);
+  const zoomRing = doc.createElement('div');
+  zoomRing.className = 'zoom-ring';
+  const hit = doc.createElement('div');
+  hit.className = 'hit';
+  const vignette = doc.createElement('div');
+  vignette.className = 'vignette';
+  const dmg = doc.createElement('div');
+  dmg.className = 'damage';
+  const ret = doc.createElement('div');
+  ret.className = 'ret-info';
+  ret.textContent = '[LMB] fire  [RMB] zoom  [R] reload  [H] damage test';
+  hud.append(cross, zoomRing, hit, ret, vignette, dmg);
+
+  /* State */
+  let health = 100,
+    armor = 50,
+    ammo = 30,
+    reserve = 120;
+  let spread = SPREAD_IDLE,
+    zoom = false;
+  let mx = innerWidth / 2,
+    my = innerHeight / 2;
+  let tPrev = performance.now() / 1000,
+    fpsEMA = 60;
+  const H = id => document.getElementById(id),
+    ui = {
+      h: H('__hval'),
+      a: H('__aval'),
+      am: H('__ammo'),
+      mg: H('__mag'),
+      fps: H('__fps'),
+    };
+  const refresh = () => {
+    ui.h.textContent = Math.max(0, Math.round(health));
+    ui.a.textContent = Math.max(0, Math.round(armor));
+    ui.am.textContent = ammo;
+    ui.mg.textContent = reserve;
+  };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  /* Position helpers */
+  function layoutCross(gap, x, y) {
+    cross.style.transform = `translate(${x}px,${y}px)`;
+    vTop.style.transform = `translate(-1px,${-gap - 16}px)`;
+    vBot.style.transform = `translate(-1px,${gap}px)`;
+    hL.style.transform = `translate(${-gap - 16}px,-1px)`;
+    hR.style.transform = `translate(${gap}px,-1px)`;
+    zoomRing.style.transform = `translate(${x - 75}px,${y - 75}px)`;
+    hit.style.transform = `translate(${x - 10}px,${y - 10}px) rotate(45deg)`;
+    ret.style.left = `${x}px`;
+    ret.style.top = `${y + 50}px`;
+    ret.style.transform = 'translateX(-50%)';
+  }
+
+  /* Input (WASD removed) */
+  addEventListener(
+    'mousemove',
+    e => {
+      mx = e.clientX;
+      my = e.clientY;
+    },
+    { passive: true }
+  );
+  addEventListener(
+    'mousedown',
+    e => {
+      if (e.button === 2) {
+        zoom = true;
+        return;
+      }
+      if (e.button === 0) fireBullet(mx, my);
+    },
+    true
+  );
+  addEventListener(
+    'mouseup',
+    e => {
+      if (e.button === 2) zoom = false;
+    },
+    true
+  );
+  addEventListener('contextmenu', e => e.preventDefault(), true);
+  addEventListener(
+    'keydown',
+    e => {
+      const k = e.key.toLowerCase();
+      if (k === 'r') reload();
+      else if (k === 'h') damage(Math.floor(10 + Math.random() * 20));
+    },
+    true
+  );
+
+  function reload() {
+    if (ammo === 30 || reserve === 0) return;
+    const need = 30 - ammo,
+      take = Math.min(need, reserve);
+    reserve -= take;
+    ammo += take;
+    refresh();
+    spread += 8;
+  }
+  function damage(n) {
+    let rem = n;
+    if (armor > 0) {
+      const hitA = Math.min(armor, Math.ceil(rem * 0.7));
+      armor -= hitA;
+      rem -= Math.ceil(hitA / 0.7);
+    }
+    if (rem > 0) health = Math.max(0, health - rem);
+    refresh();
+    dmg.style.opacity = '0.6';
+    setTimeout(() => (dmg.style.opacity = '0'), DAMAGE_FADE);
+  }
+
+  /* Bullets + Sparks (canvas) */
+  const bullets = [],
+    sparks = [];
+  function fireBullet(tx, ty) {
+    if (ammo <= 0) {
+      spread += 6;
+      return;
+    }
+    ammo--;
+    refresh();
+    const ox = innerWidth / 2,
+      oy = innerHeight - 6;
+    const dx = tx - ox,
+      dy = ty - oy,
+      L = Math.hypot(dx, dy) || 1,
+      ux = dx / L,
+      uy = dy / L;
+    const jitter = (Math.random() - 0.5) * (spread * 0.002);
+    const ca = Math.cos(jitter),
+      sa = Math.sin(jitter);
+    const rx = ux * ca - uy * sa,
+      ry = ux * sa + uy * ca;
+    bullets.push({
+      x: ox,
+      y: oy,
+      vx: rx * BULLET_SPEED,
+      vy: ry * BULLET_SPEED,
+      t: 0,
+      ttl: Math.min(1.2, L / BULLET_SPEED + TRAIL_FADE),
+      tx,
+      ty,
+    });
+    spread += SPREAD_SHOT;
+    setTimeout(() => {
+      hit.style.opacity = '1';
+      setTimeout(() => (hit.style.opacity = '0'), HITMARKER_TIME);
+    }, Math.max(0, (L / BULLET_SPEED) * 1000 - 15));
+  }
+  function spawnSparks(x, y, ang) {
+    for (let i = 0; i < SPARK_COUNT; i++) {
+      const seed = Math.random();
+      const a = ang + (Math.random() - 0.5) * Math.PI * 0.9; // wider cone
+      const s = SPARK_SPEED * (0.5 + 0.6 * Math.random());
+      sparks.push({
+        x,
+        y,
+        vx: Math.cos(a) * s,
+        vy: Math.sin(a) * s,
+        life: 0,
+        max: SPARK_FADE * (0.7 + 0.6 * Math.random()),
+        seed,
+      });
+    }
+  }
+
+  /* Loop */
+  function step() {
+    const t = performance.now() / 1000;
+    let dt = t - tPrev;
+    tPrev = t;
+    dt = Math.min(dt, 1 / 30);
+    // FPS
+    const inst = 1 / Math.max(1e-6, dt);
+    fpsEMA = fpsEMA * 0.9 + inst * 0.1;
+    ui.fps.textContent = Math.round(fpsEMA);
+    // Crosshair dynamics (no WASD effects)
+    spread = Math.max(SPREAD_IDLE, spread - SPREAD_DECAY * dt);
+    layoutCross(spread, mx, my);
+    // Scene tilt by cursor only
+    const cx = innerWidth / 2,
+      cy = innerHeight / 2,
+      nx = clamp((mx - cx) / cx, -1, 1),
+      ny = clamp((my - cy) / cy, -1, 1);
+    const tx = nx * PARALLAX_PX,
+      ty = ny * PARALLAX_PX,
+      rx = ny * -LOOK_MAX_DEG,
+      ry = nx * LOOK_MAX_DEG;
+    wrap.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translate(${tx}px,${ty}px) scale(${
+      zoom ? FOV_ZOOM : FOV_BASE
+    })`;
+    zoomRing.style.opacity = zoom ? '0.18' : '0';
+    drawFX(dt);
+    requestAnimationFrame(step);
+  }
+  function drawFX(dt) {
+    const W = fx.width,
+      H = fx.height;
+    // ultra-light fade so screen stays visible
+    //ctx.globalCompositeOperation='source-over';
+    //ctx.fillStyle=`rgba(0,0,0,${Math.max(0.02, dt/TRAIL_FADE*0.5)})`;
+    //ctx.fillRect(0,0,W,H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    // bullets (yellow)
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      b.t += dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, BULLET_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,240,120,0.95)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, BULLET_RADIUS * 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,210,80,0.25)';
+      ctx.fill();
+
+      const d2 = (b.tx - b.x) * (b.tx - b.x) + (b.ty - b.y) * (b.ty - b.y);
+      if (d2 < 9 * 9 || b.t >= b.ttl) {
+        spawnSparks(b.tx, b.ty, Math.atan2(b.vy, b.vx));
+        bullets.splice(i, 1);
+      }
+    }
+    // sparks (short/fast)
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.life += dt;
+      p.vy += SPARK_GRAV * dt * 0.5;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      const a = Math.max(0, 1 - p.life / p.max);
+      if (a <= 0) {
+        sparks.splice(i, 1);
+        continue;
+      }
+      const r = 2 + p.seed * 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,230,120,${0.75 * a})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(p.x - p.vx * 0.01, p.y - p.vy * 0.01);
+      ctx.lineTo(p.x, p.y);
+      ctx.strokeStyle = `rgba(255,200,80,${0.5 * a})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  refresh();
+  requestAnimationFrame(step);
+
+  /* ===== Cleanup ===== */
+  window.__fpsHUD = {
+    stop() {
+      removeEventListener('resize', resize);
+      removeEventListener('mousemove', () => {}, { passive: true });
+      removeEventListener('mousedown', () => {}, true);
+      removeEventListener('mouseup', () => {}, true);
+      removeEventListener('contextmenu', () => {}, true);
+      removeEventListener('keydown', () => {}, true);
+      try {
+        hud.remove();
+      } catch {}
+      try {
+        fx.remove();
+      } catch {}
+      try {
+        moved.forEach(n => wrap.contains(n) && body.insertBefore(n, wrap));
+        wrap.remove();
+      } catch {}
+      delete window.__fpsHUD;
+      console.log('FPS HUD OFF, page restored.');
+    },
+  };
+  console.log(
+    'FPS HUD ON (lighter UI, yellow fast bullets, quick sparks, no WASD). Run again to toggle OFF.'
+  );
+})();
