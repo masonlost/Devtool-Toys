@@ -1,0 +1,69 @@
+(() => {
+  if (window.__rbowStop) window.__rbowStop();
+
+  // Tunables
+  const PERIOD_MS = 4000;   // speed (lower = faster)
+  const STEP_DEG  = 18;     // wavelength (lower = longer)
+  const REVERSE   = true;   // flip direction
+
+  // CSS once
+  const css = `
+    .__rbow-wrap { white-space: pre-wrap; display:inline; }
+    .__rbow-char { color: hsl(calc(var(--base,0) + var(--i,0) * var(--step,18)) 100% 50%); }
+  `;
+  let style = document.getElementById('__rbow-style');
+  if (!style) {
+    style = document.createElement('style');
+    style.id = '__rbow-style';
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+
+  // Collect all text nodes first (so DOM changes don't break traversal)
+  const texts = [];
+  const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) { return /\S/.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; }
+  });
+  for (let n; (n = tw.nextNode()); ) texts.push(n);
+
+  const wraps = [];
+  for (const node of texts) {
+    const parent = node.parentElement;
+    if (!parent) continue;
+    if (parent.closest('script,style,textarea,noscript,svg,math,[contenteditable],input,select,option,.__rbow-wrap')) continue;
+
+    const wrap = document.createElement('span');
+    wrap.className = '__rbow-wrap';
+    wrap.style.setProperty('--step', String(STEP_DEG));
+
+    const frag = document.createDocumentFragment();
+    const s = node.nodeValue;
+    for (let i = 0; i < s.length; i++) {
+      const ch = document.createElement('span');
+      ch.className = '__rbow-char';
+      ch.textContent = s[i];
+      ch.style.setProperty('--i', i);
+      frag.appendChild(ch);
+    }
+    wrap.appendChild(frag);
+    parent.replaceChild(wrap, node);
+
+    wraps.push({ el: wrap, phase: Math.random() * 360 });
+  }
+
+  // Animate (reverse by subtracting time from phase)
+  const degPerMs = 360 / PERIOD_MS;
+  let rafId;
+  function frame(now) {
+    const t = now * degPerMs;
+    for (const w of wraps) {
+      const base = REVERSE ? (w.phase - t) : (w.phase + t);
+      w.el.style.setProperty('--base', ((base % 360) + 360) % 360);
+    }
+    rafId = requestAnimationFrame(frame);
+  }
+  rafId = requestAnimationFrame(frame);
+
+  window.__rbowStop = () => { cancelAnimationFrame(rafId); console.log('Stopped. Reload to fully undo wrapping.'); };
+  console.log(`Rainbow wave ON across ${wraps.length} text nodes. Use __rbowStop() to stop.`);
+})();
